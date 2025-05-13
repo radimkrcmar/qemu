@@ -58,6 +58,7 @@ void riscv_kvm_aplic_request(void *opaque, int irq, int level)
 
 static bool cap_has_mp_state;
 static bool cap_mp_state_reset;
+static bool cap_userspace_sbi;
 
 static uint64_t kvm_riscv_reg_id_ulong(CPURISCVState *env, uint64_t type,
                                  uint64_t idx)
@@ -1437,6 +1438,10 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
         cap_mp_state_reset = true;
     }
 
+    if (kvm_vm_enable_cap(s, KVM_CAP_RISCV_USERSPACE_SBI, 0) == 0) {
+        cap_userspace_sbi = true;
+    }
+
     return 0;
 }
 
@@ -1562,10 +1567,15 @@ static int kvm_riscv_handle_sbi(CPUState *cs, struct kvm_run *run)
         kvm_riscv_handle_sbi_dbcn(cs, run);
         break;
     default:
-        qemu_log_mask(LOG_UNIMP,
-                      "%s: un-handled SBI EXIT, specific reasons is %lu\n",
-                      __func__, run->riscv_sbi.extension_id);
-        ret = -1;
+        if (cap_userspace_sbi) {
+            run->riscv_sbi.ret[0] = SBI_ERR_NOT_SUPPORTED;
+            ret = 0;
+        } else {
+            ret = -1;
+            qemu_log_mask(LOG_UNIMP,
+                          "%s: un-handled SBI EXIT, specific reasons is %lu\n",
+                          __func__, run->riscv_sbi.extension_id);
+        }
         break;
     }
     return ret;
