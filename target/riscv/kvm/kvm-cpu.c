@@ -57,6 +57,7 @@ void riscv_kvm_aplic_request(void *opaque, int irq, int level)
 }
 
 static bool cap_has_mp_state;
+static bool cap_mp_state_reset;
 
 static uint64_t kvm_riscv_reg_id_ulong(CPURISCVState *env, uint64_t type,
                                  uint64_t idx)
@@ -1268,6 +1269,14 @@ int kvm_riscv_sync_mpstate_to_kvm(RISCVCPU *cpu, int state)
 int kvm_arch_put_registers(CPUState *cs, int level, Error **errp)
 {
     int ret = 0;
+    RISCVCPU *cpu = RISCV_CPU(cs);
+
+    if (cap_mp_state_reset && KVM_PUT_RESET_STATE == level) {
+        ret = kvm_riscv_sync_mpstate_to_kvm(cpu, KVM_MP_STATE_INIT_RECEIVED);
+        if (ret) {
+            return ret;
+        }
+    }
 
     ret = kvm_riscv_put_regs_core(cs);
     if (ret) {
@@ -1290,7 +1299,6 @@ int kvm_arch_put_registers(CPUState *cs, int level, Error **errp)
     }
 
     if (KVM_PUT_RESET_STATE == level) {
-        RISCVCPU *cpu = RISCV_CPU(cs);
         if (cs->cpu_index == 0) {
             ret = kvm_riscv_sync_mpstate_to_kvm(cpu, KVM_MP_STATE_RUNNABLE);
         } else {
@@ -1424,6 +1432,11 @@ int kvm_arch_get_default_type(MachineState *ms)
 int kvm_arch_init(MachineState *ms, KVMState *s)
 {
     cap_has_mp_state = kvm_check_extension(s, KVM_CAP_MP_STATE);
+
+    if (kvm_vm_enable_cap(s, KVM_CAP_RISCV_MP_STATE_RESET, 0) == 0) {
+        cap_mp_state_reset = true;
+    }
+
     return 0;
 }
 
