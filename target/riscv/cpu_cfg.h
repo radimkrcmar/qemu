@@ -196,6 +196,18 @@ struct RISCVCPUConfig {
 
     bool short_isa_string;
 
+    bool sbi_ext_v01;
+    bool sbi_ext_time;
+    bool sbi_ext_ipi;
+    bool sbi_ext_rfence;
+    bool sbi_ext_srst;
+    bool sbi_ext_hsm;
+    bool sbi_ext_pmu;
+    bool sbi_ext_dbcn;
+    bool sbi_ext_sta;
+    bool sbi_ext_susp;
+    bool sbi_ext_base;
+
     RISCVSATPMap satp_mode;
 };
 

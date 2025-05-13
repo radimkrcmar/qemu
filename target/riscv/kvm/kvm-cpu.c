@@ -428,10 +428,35 @@ static KVMCPUConfig kvm_v_vlenb = {
                    KVM_REG_RISCV_VECTOR_CSR_REG(vlenb)
 };
 
-static KVMCPUConfig kvm_sbi_dbcn = {
-    .name = "sbi_dbcn",
-    .kvm_reg_id = KVM_REG_RISCV | KVM_REG_SIZE_U64 |
-                  KVM_REG_RISCV_SBI_EXT | KVM_RISCV_SBI_EXT_DBCN
+// TODO: expose KVMCPUConfig cpu to user
+typedef struct KVMSBIExtConfig {
+    unsigned long sbi_extid;
+    KVMCPUConfig cpu;
+} KVMSBIExtConfig;
+
+#define KVM_SBI_EXT_CFG(user, cfg, sbi, kvm) \
+    [kvm] = { \
+        .sbi_extid = sbi, \
+        .cpu = { \
+            .name = user, \
+            .offset = CPU_CFG_OFFSET(cfg),\
+            .kvm_reg_id = KVM_REG_RISCV | KVM_REG_SIZE_U64 | \
+                KVM_REG_RISCV_SBI_EXT | kvm \
+        }, \
+    } \
+
+static KVMSBIExtConfig kvm_sbi_ext_cfgs[] = {
+    // TODO: decide what to do with V01
+    KVM_SBI_EXT_CFG("sbi_time",   sbi_ext_time,   SBI_EXT_TIME,   KVM_RISCV_SBI_EXT_TIME),
+    KVM_SBI_EXT_CFG("sbi_ipi",    sbi_ext_ipi,    SBI_EXT_IPI,    KVM_RISCV_SBI_EXT_IPI),
+    KVM_SBI_EXT_CFG("sbi_rfence", sbi_ext_rfence, SBI_EXT_RFENCE, KVM_RISCV_SBI_EXT_RFENCE),
+    KVM_SBI_EXT_CFG("sbi_srst",   sbi_ext_srst,   SBI_EXT_SRST,   KVM_RISCV_SBI_EXT_SRST),
+    KVM_SBI_EXT_CFG("sbi_hsm",    sbi_ext_hsm,    SBI_EXT_HSM,    KVM_RISCV_SBI_EXT_HSM),
+    KVM_SBI_EXT_CFG("sbi_pmu",    sbi_ext_pmu,    SBI_EXT_PMU,    KVM_RISCV_SBI_EXT_PMU),
+    KVM_SBI_EXT_CFG("sbi_dbcn",   sbi_ext_dbcn,   SBI_EXT_DBCN,   KVM_RISCV_SBI_EXT_DBCN),
+    KVM_SBI_EXT_CFG("sbi_sta",    sbi_ext_sta,    SBI_EXT_STA,    KVM_RISCV_SBI_EXT_STA),
+    KVM_SBI_EXT_CFG("sbi_susp",   sbi_ext_susp,   SBI_EXT_SUSP,   KVM_RISCV_SBI_EXT_SUSP),
+    KVM_SBI_EXT_CFG("sbi_base",   sbi_ext_base,   SBI_EXT_BASE,   KVM_RISCV_SBI_EXT_BASE),
 };
 
 static void kvm_riscv_update_cpu_cfg_isa_ext(RISCVCPU *cpu, CPUState *cs)
@@ -461,6 +486,38 @@ static void kvm_riscv_update_cpu_cfg_isa_ext(RISCVCPU *cpu, CPUState *cs)
                 exit(EXIT_FAILURE);
             }
         }
+    }
+}
+
+static int kvm_vcpu_control_sbi_ext(CPUState *cs,
+                                    enum KVM_RISCV_SBI_EXT_ID ext_id,
+                                    target_ulong reg)
+{
+    KVMCPUConfig *ext_cfg = &kvm_sbi_ext_cfgs[ext_id].cpu;
+
+    if (!ext_cfg->supported && reg) {
+        error_report("KVM SBI on CPU %d does not support feature %d.",
+                     cs->cpu_index, ext_id);
+        return -1;
+    }
+
+    return kvm_set_one_reg(cs, ext_cfg->kvm_reg_id, &reg);
+}
+
+static void kvm_riscv_update_cpu_sbi_ext(RISCVCPU *cpu, CPUState *cs)
+{
+    int ret = 0;
+
+    /* Handle HSM in userspace.  BASE is needed to expose forwarded HSM. */
+    if (cap_userspace_sbi && cap_has_mp_state) {
+        ret |= kvm_vcpu_control_sbi_ext(cs, KVM_RISCV_SBI_EXT_BASE, 0);
+        ret |= kvm_vcpu_control_sbi_ext(cs, KVM_RISCV_SBI_EXT_HSM, 0);
+    }
+
+    // TODO: decide what to do with DBCN and V01
+
+    if (ret) {
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -1079,20 +1136,6 @@ static int uint64_cmp(const void *a, const void *b)
     return 0;
 }
 
-static void kvm_riscv_check_sbi_dbcn_support(RISCVCPU *cpu,
-                                             KVMScratchCPU *kvmcpu,
-                                             struct kvm_reg_list *reglist)
-{
-    struct kvm_reg_list *reg_search;
-
-    reg_search = bsearch(&kvm_sbi_dbcn.kvm_reg_id, reglist->reg, reglist->n,
-                         sizeof(uint64_t), uint64_cmp);
-
-    if (reg_search) {
-        kvm_sbi_dbcn.supported = true;
-    }
-}
-
 static void kvm_riscv_read_vlenb(RISCVCPU *cpu, KVMScratchCPU *kvmcpu,
                                  struct kvm_reg_list *reglist)
 {
@@ -1120,13 +1163,37 @@ static void kvm_riscv_read_vlenb(RISCVCPU *cpu, KVMScratchCPU *kvmcpu,
     }
 }
 
+static void kvm_riscv_init_reg(RISCVCPU *cpu, KVMScratchCPU *kvmcpu,
+                               struct kvm_reg_list *reglist,
+                               KVMCPUConfig *ext_cfg, uint64_t reg_id)
+{
+    uint64_t val, *reg_search;
+    struct kvm_one_reg reg;
+
+    reg_search = bsearch(&reg_id, reglist->reg, reglist->n,
+                         sizeof(uint64_t), uint64_cmp);
+    if (!reg_search) {
+        return;
+    }
+
+    reg.id = reg_id;
+    reg.addr = (uint64_t)&val;
+    if (ioctl(kvmcpu->cpufd, KVM_GET_ONE_REG, &reg)) {
+        error_report("Unable to read KVM register %s: %s",
+                     ext_cfg->name, strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    ext_cfg->supported = true;
+    kvm_cpu_cfg_set(cpu, ext_cfg, val);
+}
+
 static void kvm_riscv_init_multiext_cfg(RISCVCPU *cpu, KVMScratchCPU *kvmcpu)
 {
-    KVMCPUConfig *multi_ext_cfg;
-    struct kvm_one_reg reg;
+    KVMCPUConfig *ext_cfg;
     struct kvm_reg_list rl_struct;
     struct kvm_reg_list *reglist;
-    uint64_t val, reg_id, *reg_search;
+    uint64_t reg_id;
     int i, ret;
 
     rl_struct.n = 0;
@@ -1165,26 +1232,10 @@ static void kvm_riscv_init_multiext_cfg(RISCVCPU *cpu, KVMScratchCPU *kvmcpu)
     qsort(&reglist->reg, reglist->n, sizeof(uint64_t), uint64_cmp);
 
     for (i = 0; i < ARRAY_SIZE(kvm_multi_ext_cfgs); i++) {
-        multi_ext_cfg = &kvm_multi_ext_cfgs[i];
+        ext_cfg = &kvm_multi_ext_cfgs[i];
         reg_id = kvm_riscv_reg_id_ulong(&cpu->env, KVM_REG_RISCV_ISA_EXT,
-                                        multi_ext_cfg->kvm_reg_id);
-        reg_search = bsearch(&reg_id, reglist->reg, reglist->n,
-                             sizeof(uint64_t), uint64_cmp);
-        if (!reg_search) {
-            continue;
-        }
-
-        reg.id = reg_id;
-        reg.addr = (uint64_t)&val;
-        ret = ioctl(kvmcpu->cpufd, KVM_GET_ONE_REG, &reg);
-        if (ret != 0) {
-            error_report("Unable to read ISA_EXT KVM register %s: %s",
-                         multi_ext_cfg->name, strerror(errno));
-            exit(EXIT_FAILURE);
-        }
-
-        multi_ext_cfg->supported = true;
-        kvm_cpu_cfg_set(cpu, multi_ext_cfg, val);
+                                        ext_cfg->kvm_reg_id);
+        kvm_riscv_init_reg(cpu, kvmcpu, reglist, ext_cfg, reg_id);
     }
 
     if (cpu->cfg.ext_zicbom) {
@@ -1199,7 +1250,12 @@ static void kvm_riscv_init_multiext_cfg(RISCVCPU *cpu, KVMScratchCPU *kvmcpu)
         kvm_riscv_read_vlenb(cpu, kvmcpu, reglist);
     }
 
-    kvm_riscv_check_sbi_dbcn_support(cpu, kvmcpu, reglist);
+    // TODO: consider using the KVM IOCTL for multiple SBI extensions
+    for (i = 0; i < ARRAY_SIZE(kvm_sbi_ext_cfgs); i++) {
+        ext_cfg = &kvm_sbi_ext_cfgs[i].cpu;
+        reg_id = ext_cfg->kvm_reg_id;
+        kvm_riscv_init_reg(cpu, kvmcpu, reglist, ext_cfg, reg_id);
+    }
 }
 
 static void riscv_init_kvm_registers(Object *cpu_obj)
@@ -1381,17 +1437,6 @@ static int kvm_vcpu_set_machine_ids(RISCVCPU *cpu, CPUState *cs)
     return ret;
 }
 
-static int kvm_vcpu_enable_sbi_dbcn(RISCVCPU *cpu, CPUState *cs)
-{
-    target_ulong reg = 1;
-
-    if (!kvm_sbi_dbcn.supported) {
-        return 0;
-    }
-
-    return kvm_set_one_reg(cs, kvm_sbi_dbcn.kvm_reg_id, &reg);
-}
-
 int kvm_arch_init_vcpu(CPUState *cs)
 {
     int ret = 0;
@@ -1408,8 +1453,7 @@ int kvm_arch_init_vcpu(CPUState *cs)
 
     kvm_riscv_update_cpu_misa_ext(cpu, cs);
     kvm_riscv_update_cpu_cfg_isa_ext(cpu, cs);
-
-    ret = kvm_vcpu_enable_sbi_dbcn(cpu, cs);
+    kvm_riscv_update_cpu_sbi_ext(cpu, cs);
 
     return ret;
 }
@@ -1545,6 +1589,135 @@ static void kvm_riscv_handle_sbi_dbcn(CPUState *cs, struct kvm_run *run)
     }
 }
 
+static void kvm_sbi_hart_start(CPUState *cs, run_on_cpu_data data)
+{
+    struct kvm_run *run = (struct kvm_run *) data.host_ptr;
+    RISCVCPU *cpu = RISCV_CPU(cs);
+    CPURISCVState *env = &cpu->env;
+    struct kvm_mp_state mp_state;
+
+    if (kvm_vcpu_ioctl(CPU(cpu), KVM_GET_MP_STATE, &mp_state)) {
+        error_report("KVM: failed to get pre-start MP_STATE"); // TODO: look for more appropriate error report function
+        run->riscv_sbi.ret[0] = SBI_ERR_FAILED;
+        return;
+    }
+
+    if (mp_state.mp_state == KVM_MP_STATE_RUNNABLE) {
+        run->riscv_sbi.ret[0] = SBI_ERR_ALREADY_AVAILABLE;
+        return;
+    }
+
+    kvm_cpu_synchronize_state(cs);
+
+    env->pc = run->riscv_sbi.args[1];
+    env->gpr[10] = cs->cpu_index;
+    env->gpr[11] = run->riscv_sbi.args[2];
+
+    if (kvm_riscv_sync_mpstate_to_kvm(cpu, KVM_MP_STATE_RUNNABLE)) {
+        run->riscv_sbi.ret[0] = SBI_ERR_FAILED;
+        return;
+    }
+
+    run->riscv_sbi.ret[0] = SBI_SUCCESS;
+}
+
+static void kvm_sbi_hart_get_status(CPUState *cs, run_on_cpu_data data)
+{
+    struct kvm_run *run = (struct kvm_run *) data.host_ptr;
+    RISCVCPU *cpu = RISCV_CPU(cs);
+    struct kvm_mp_state mp_state;
+
+    if (kvm_vcpu_ioctl(CPU(cpu), KVM_GET_MP_STATE, &mp_state)) {
+        error_report("KVM: failed to get current MP_STATE");
+        exit(1); // TODO: the SBI ecall cannot fail
+    }
+
+    run->riscv_sbi.ret[0] = SBI_SUCCESS;
+    run->riscv_sbi.ret[1] = !!mp_state.mp_state;
+}
+
+static int kvm_riscv_handle_sbi_hsm(CPUState *cs, struct kvm_run *run)
+{
+    RISCVCPU *cpu = RISCV_CPU(cs);
+    int ret = 0;
+    Error *err = NULL;
+
+    // TODO: handle errors and invalid inputs
+    switch (run->riscv_sbi.function_id) {
+    case SBI_EXT_HSM_HART_START:
+        run->riscv_sbi.ret[0] = SBI_ERR_INVALID_PARAM;
+        CPU_FOREACH(cs) {
+            if (cs->cpu_index == run->riscv_sbi.args[0]) {
+                run_on_cpu(cs, kvm_sbi_hart_start, RUN_ON_CPU_HOST_PTR(run));
+                break;
+            }
+        }
+        break;
+    case SBI_EXT_HSM_HART_STOP:
+        kvm_riscv_reset_vcpu(cpu); // TODO: fully reset the state
+        kvm_arch_put_registers(cs, KVM_PUT_RESET_STATE, &err);
+        kvm_riscv_sync_mpstate_to_kvm(cpu, KVM_MP_STATE_STOPPED); // TODO: kvm_arch_put_registers also sets mpstate
+        break;
+    case SBI_EXT_HSM_HART_GET_STATUS:
+        // TODO: mirror HSM status in QEMU
+        run->riscv_sbi.ret[0] = SBI_ERR_INVALID_PARAM;
+        CPU_FOREACH(cs) {
+            if (cs->cpu_index == run->riscv_sbi.args[0]) {
+                run_on_cpu(cs, kvm_sbi_hart_get_status,
+                           RUN_ON_CPU_HOST_PTR(run));
+                break;
+            }
+        }
+        break;
+    default:
+        run->riscv_sbi.ret[0] = SBI_ERR_NOT_SUPPORTED;
+        break;
+    }
+    return ret;
+}
+
+static int kvm_riscv_handle_sbi_base(CPUState *cs, struct kvm_run *run)
+{
+    RISCVCPU *cpu = RISCV_CPU(cs);
+    int ret = 0, i;
+
+    run->riscv_sbi.ret[0] = SBI_SUCCESS;
+    switch (run->riscv_sbi.function_id) {
+        case SBI_EXT_BASE_GET_SPEC_VERSION:
+            run->riscv_sbi.ret[1] = 2 << 24; // TODO: part of machine type
+            break;
+        case SBI_EXT_BASE_GET_IMP_ID:
+            run->riscv_sbi.ret[1] = 3; // TODO: part of machine type?
+            break;
+        case SBI_EXT_BASE_GET_IMP_VERSION:
+            run->riscv_sbi.ret[1] = 0; // TODO: part of machine type
+            break;
+        case SBI_EXT_BASE_PROBE_EXT:
+            run->riscv_sbi.ret[1] = 0;
+            for (i = 0; i < ARRAY_SIZE(kvm_sbi_ext_cfgs); i++) {
+                if (kvm_sbi_ext_cfgs[i].sbi_extid == run->riscv_sbi.args[0]) {
+                    run->riscv_sbi.ret[1] = kvm_cpu_cfg_get(cpu, &kvm_sbi_ext_cfgs[i].cpu);
+                    break;
+                }
+            }
+            break;
+        case SBI_EXT_BASE_GET_MVENDORID:
+            run->riscv_sbi.ret[1] = cpu->cfg.mvendorid;
+            break;
+        case SBI_EXT_BASE_GET_MARCHID:
+            run->riscv_sbi.ret[1] = cpu->cfg.marchid;
+            break;
+        case SBI_EXT_BASE_GET_MIMPID:
+            run->riscv_sbi.ret[1] = cpu->cfg.mimpid;
+            break;
+        default:
+            run->riscv_sbi.ret[0] = SBI_ERR_NOT_SUPPORTED;
+            break;
+    }
+
+    return ret;
+}
+
 static int kvm_riscv_handle_sbi(CPUState *cs, struct kvm_run *run)
 {
     int ret = 0;
@@ -1565,6 +1738,14 @@ static int kvm_riscv_handle_sbi(CPUState *cs, struct kvm_run *run)
         break;
     case SBI_EXT_DBCN:
         kvm_riscv_handle_sbi_dbcn(cs, run);
+        break;
+    case SBI_EXT_HSM:
+        bql_lock();
+        ret = kvm_riscv_handle_sbi_hsm(cs, run);
+        bql_unlock();
+        break;
+    case SBI_EXT_BASE:
+        ret = kvm_riscv_handle_sbi_base(cs, run);
         break;
     default:
         if (cap_userspace_sbi) {

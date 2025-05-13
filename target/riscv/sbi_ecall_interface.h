@@ -39,6 +39,11 @@
 #define SBI_EXT_RFENCE                  0x52464E43
 #define SBI_EXT_HSM                     0x48534D
 #define SBI_EXT_DBCN                    0x4442434E
+#define SBI_EXT_SRST                    0x53525354
+#define SBI_EXT_SUSP                    0x53555350
+#define SBI_EXT_PMU                     0x504D55
+#define SBI_EXT_STA                     0x535441
+#define SBI_EXT_NACL                    0x4E41434C
 
 /* SBI function IDs for BASE extension */
 #define SBI_EXT_BASE_GET_SPEC_VERSION   0x0
