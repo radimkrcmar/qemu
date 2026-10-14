@@ -1362,3 +1362,9 @@ DEF_HELPER_FLAGS_3(sc_probe_write, TCG_CALL_NO_WG, void, env, tl, tl)
 /* Invalidate reservations overlapping a completed linux-user store. */
 DEF_HELPER_3(riscv_invalidate_reservations, void, env, tl, tl)
 #endif
+
+/* Zkl (KLE) */
+DEF_HELPER_2(kl_exec_grp, void, env, i32)
+DEF_HELPER_2(kl_setst, void, env, i32)
+DEF_HELPER_2(kl_load, void, env, i32)
+DEF_HELPER_2(kl_store, void, env, i32)

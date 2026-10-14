@@ -29,6 +29,7 @@
 #include "exec/helper-proto.h"
 #include "internals.h"
 #include "vector_internals.h"
+#include "ghash_internal.h"
 
 static uint64_t clmul64(uint64_t y, uint64_t x)
 {
@@ -96,18 +97,6 @@ GEN_VEXT_VX(vrol_vx_b, 1)
 GEN_VEXT_VX(vrol_vx_h, 2)
 GEN_VEXT_VX(vrol_vx_w, 4)
 GEN_VEXT_VX(vrol_vx_d, 8)
-
-static uint64_t brev8(uint64_t val)
-{
-    val = ((val & 0x5555555555555555ull) << 1) |
-          ((val & 0xAAAAAAAAAAAAAAAAull) >> 1);
-    val = ((val & 0x3333333333333333ull) << 2) |
-          ((val & 0xCCCCCCCCCCCCCCCCull) >> 2);
-    val = ((val & 0x0F0F0F0F0F0F0F0Full) << 4) |
-          ((val & 0xF0F0F0F0F0F0F0F0ull) >> 4);
-
-    return val;
-}
 
 RVVCALL(OPIVV1, vbrev8_v_b, OP_UU_B, H1, H1, brev8)
 RVVCALL(OPIVV1, vbrev8_v_h, OP_UU_H, H2, H2, brev8)
@@ -804,28 +793,10 @@ void HELPER(vghsh_vv)(void *vd_vptr, void *vs1_vptr, void *vs2_vptr,
     VSTART_CHECK_EARLY_EXIT(env, env->vl);
 
     for (uint32_t i = env->vstart / 4; i < env->vl / 4; i++) {
-        uint64_t Y[2] = {vd[i * 2 + 0], vd[i * 2 + 1]};
-        uint64_t H[2] = {brev8(vs2[i * 2 + 0]), brev8(vs2[i * 2 + 1])};
-        uint64_t X[2] = {vs1[i * 2 + 0], vs1[i * 2 + 1]};
-        uint64_t Z[2] = {0, 0};
+        uint64_t S[2] = {vd[i * 2 + 0] ^ vs1[i * 2 + 0],
+                         vd[i * 2 + 1] ^ vs1[i * 2 + 1]};
 
-        uint64_t S[2] = {brev8(Y[0] ^ X[0]), brev8(Y[1] ^ X[1])};
-
-        for (int j = 0; j < 128; j++) {
-            if ((S[j / 64] >> (j % 64)) & 1) {
-                Z[0] ^= H[0];
-                Z[1] ^= H[1];
-            }
-            bool reduce = ((H[1] >> 63) & 1);
-            H[1] = H[1] << 1 | H[0] >> 63;
-            H[0] = H[0] << 1;
-            if (reduce) {
-                H[0] ^= 0x87;
-            }
-        }
-
-        vd[i * 2 + 0] = brev8(Z[0]);
-        vd[i * 2 + 1] = brev8(Z[1]);
+        ghash_mul(&vd[i * 2], S, &vs2[i * 2]);
     }
     /* set tail elements to 1s */
     vext_set_elems_1s(vd, vta, env->vl * 4, total_elems * 4);
@@ -843,25 +814,7 @@ void HELPER(vgmul_vv)(void *vd_vptr, void *vs2_vptr, CPURISCVState *env,
     VSTART_CHECK_EARLY_EXIT(env, env->vl);
 
     for (uint32_t i = env->vstart / 4; i < env->vl / 4; i++) {
-        uint64_t Y[2] = {brev8(vd[i * 2 + 0]), brev8(vd[i * 2 + 1])};
-        uint64_t H[2] = {brev8(vs2[i * 2 + 0]), brev8(vs2[i * 2 + 1])};
-        uint64_t Z[2] = {0, 0};
-
-        for (int j = 0; j < 128; j++) {
-            if ((Y[j / 64] >> (j % 64)) & 1) {
-                Z[0] ^= H[0];
-                Z[1] ^= H[1];
-            }
-            bool reduce = ((H[1] >> 63) & 1);
-            H[1] = H[1] << 1 | H[0] >> 63;
-            H[0] = H[0] << 1;
-            if (reduce) {
-                H[0] ^= 0x87;
-            }
-        }
-
-        vd[i * 2 + 0] = brev8(Z[0]);
-        vd[i * 2 + 1] = brev8(Z[1]);
+        ghash_mul(&vd[i * 2], &vd[i * 2], &vs2[i * 2]);
     }
     /* set tail elements to 1s */
     vext_set_elems_1s(vd, vta, env->vl * 4, total_elems * 4);

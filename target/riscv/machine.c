@@ -495,6 +495,62 @@ static const VMStateDescription vmstate_mseccfg = {
     }
 };
 
+static bool zkl_needed(void *opaque)
+{
+    RISCVCPU *cpu = opaque;
+
+    return cpu->cfg.ext_zkl;
+}
+
+static const VMStateDescription vmstate_zkl_locker = {
+    .name = "cpu/zkl/locker",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64_ARRAY(mdh, RISCVKleLocker, 2),
+        VMSTATE_UINT8_ARRAY(content, RISCVKleLocker, KL_CONTENT_MAX),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_zkl = {
+    .name = "cpu/zkl",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = zkl_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT_ARRAY(env.kle.lk, RISCVCPU, KL_NUM_LOCKERS, 1,
+                             vmstate_zkl_locker, RISCVKleLocker),
+        VMSTATE_UINT64(env.kle.klstart, RISCVCPU),
+        VMSTATE_UINT64(env.kle.klnamedlocker, RISCVCPU),
+        VMSTATE_UINT8_ARRAY(env.kle.siv, RISCVCPU, 16),
+        VMSTATE_UINT8_ARRAY(env.kle.impqual, RISCVCPU, 16),
+        VMSTATE_UINT8_ARRAY(env.kle.siv2, RISCVCPU, 16),
+        VMSTATE_UINT64(env.kle.mllockerstatus, RISCVCPU),
+        VMSTATE_UINT64(env.kle.sllockerstatus, RISCVCPU),
+        VMSTATE_UINT64_ARRAY(env.kle.csk, RISCVCPU, 4),
+        VMSTATE_BOOL(env.kle.csk_active, RISCVCPU),
+        VMSTATE_UINT8(env.kle.csk_written, RISCVCPU),
+        VMSTATE_UINT64_ARRAY(env.kle.csk_pending, RISCVCPU, 4),
+        VMSTATE_UINT64_ARRAY(env.kle.mlocality, RISCVCPU, 2),
+        VMSTATE_UINT64_ARRAY(env.kle.physbootscrt, RISCVCPU, 2),
+        VMSTATE_UINT64_ARRAY(env.kle.slocality, RISCVCPU, 2),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+/* The process-wide KLE secrets, registered once by the first Zkl hart. */
+const VMStateDescription vmstate_riscv_zkl_secrets = {
+    .name = "riscv_zkl_secrets",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64_ARRAY(csk, RISCVKleSecrets, 4),
+        VMSTATE_UINT8_ARRAY(devscrt, RISCVKleSecrets, 16),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 const VMStateDescription vmstate_riscv_cpu = {
     .name = "cpu",
     .version_id = 12,
@@ -576,6 +632,7 @@ const VMStateDescription vmstate_riscv_cpu = {
         &vmstate_ctr,
         &vmstate_sstc,
         &vmstate_mseccfg,
+        &vmstate_zkl,
         NULL
     }
 };

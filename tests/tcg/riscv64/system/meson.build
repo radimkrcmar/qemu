@@ -48,6 +48,42 @@ tests += {
 }
 
 tests += {
+  'test-zkl.c': {
+    'cflags': cflags + ['-march=rv64gcv', '-mabi=lp64d', '-mcmodel=medany',
+                        '-O2', '-fno-pie', '-no-pie', '-static'],
+    'qemu_args': ['-cpu', 'max,x-zkl=true', qemu_args],
+  }
+}
+tests += {
+  'test-zkl.c': {
+    'exe_name': 'test-zkl-noctr',
+    'cflags': cflags + ['-march=rv64gcv', '-mabi=lp64d', '-mcmodel=medany',
+                        '-O2', '-fno-pie', '-no-pie', '-static',
+                        '-DZKL_NO_CTR'],
+    'qemu_args': ['-cpu', 'max,x-zkl=true,x-zkl-ctr=false', qemu_args],
+  }
+}
+tests += {
+  'test-zkl.c': {
+    'exe_name': 'test-zkl-nogcm',
+    'cflags': cflags + ['-march=rv64gcv', '-mabi=lp64d', '-mcmodel=medany',
+                        '-O2', '-fno-pie', '-no-pie', '-static',
+                        '-DZKL_NO_GCM'],
+    'qemu_args': ['-cpu', 'max,x-zkl=true,x-zkl-gcm=false', qemu_args],
+  }
+}
+tests += {
+  'test-zkl.c': {
+    'exe_name': 'test-zkl-csk',
+    'cflags': cflags + ['-march=rv64gcv', '-mabi=lp64d', '-mcmodel=medany',
+                        '-O2', '-fno-pie', '-no-pie', '-static',
+                        '-DZKL_CSK_FIXED'],
+    'qemu_args': ['-cpu', 'max,x-zkl=true,x-zkl-csk=000102030405060708090a0b'
+                  + '0c0d0e0f101112131415161718191a1b1c1d1e1f', qemu_args],
+  }
+}
+
+tests += {
   'test-zicclsm.S': {
     'cflags': cflags + ['-march=rv64gcv_zfh'],
     'qemu_args': ['-cpu', 'rv64,v=true,zfh=true,zicclsm=true', qemu_args],

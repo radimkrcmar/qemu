@@ -604,6 +604,24 @@
 /* Crypto Extension */
 #define CSR_SEED            0x015
 
+/* Zkl (KLE) CSRs: all addresses are provisional (custom ranges) */
+#define CSR_KLSTART         0x800
+#define CSR_KLNAMEDLOCKER   0x801
+#define CSR_KLMVENDORID     0xcc0
+#define CSR_KLMARCHID       0xcc1
+#define CSR_KLMIMPID        0xcc2
+#define CSR_KLMAXIOBUFLEN   0xcc3
+#define CSR_SKLLOCALITY0    0x5e0
+#define CSR_SKLLOCALITY1    0x5e1
+#define CSR_SLLOCKERSTATUS  0x5e2
+#define CSR_MKLCSK0         0xbc0
+#define CSR_MKLCSK3         0xbc3
+#define CSR_MKLLOCALITY0    0xbc4
+#define CSR_MKLLOCALITY1    0xbc5
+#define CSR_MKLPHYSBOOTSCRT0 0xbc6
+#define CSR_MKLPHYSBOOTSCRT1 0xbc7
+#define CSR_MLLOCKERSTATUS  0xbc8
+
 /* Zcmt Extension */
 #define CSR_JVT             0x017
 
@@ -628,6 +646,7 @@
 #define MSTATUS_TSR         0x00400000 /* since: priv-1.10 */
 #define MSTATUS_SPELP       0x00800000 /* zicfilp */
 #define MSTATUS_SDT         0x01000000
+#define MSTATUS_KLS         0x06000000 /* Zkl, provisional */
 #define MSTATUS_MPELP       0x020000000000 /* zicfilp */
 #define MSTATUS_SBE         0x1000000000ULL
 #define MSTATUS_MBE         0x2000000000ULL
@@ -664,6 +683,7 @@ typedef enum {
 #define SSTATUS_MXR         0x00080000
 #define SSTATUS_SPELP       MSTATUS_SPELP   /* zicfilp */
 #define SSTATUS_SDT         MSTATUS_SDT
+#define SSTATUS_KLS         MSTATUS_KLS
 
 #define SSTATUS64_UXL       0x0000000300000000ULL
 
@@ -784,6 +804,19 @@ typedef enum RISCVException {
     RISCV_EXCP_LOAD_GUEST_ACCESS_FAULT = 0x15,
     RISCV_EXCP_VIRT_INSTRUCTION_FAULT = 0x16,
     RISCV_EXCP_STORE_GUEST_AMO_ACCESS_FAULT = 0x17,
+    /*
+     * Zkl (KLE) exceptions: cause numbers are provisional (the custom range
+     * 24-31), none is delegable.  Clock-unavailable (Zklexpire) and
+     * RBG-unavailable are never raised by this model.
+     */
+    RISCV_EXCP_KL_FATAL_ERROR = 0x18,
+    RISCV_EXCP_KL_MISSING_CSK = 0x19,
+    RISCV_EXCP_KL_LOCKER_OFF = 0x1a,
+    RISCV_EXCP_KL_UNSUPPORTED_METADATA = 0x1b,
+    RISCV_EXCP_KL_PRIVILEGE_VIOLATION = 0x1c,
+    RISCV_EXCP_KL_OUT_OF_MEMORY = 0x1d,
+    RISCV_EXCP_KL_RBG_UNAVAILABLE = 0x1e,
+    RISCV_EXCP_KL_CLOCK_UNAVAILABLE = 0x1f,
     RISCV_EXCP_SEMIHOST = 0x3f,
 } RISCVException;
 

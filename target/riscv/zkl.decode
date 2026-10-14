@@ -1,0 +1,18 @@
+#
+# Translation routines for the Zkl (KLE, Cryptographic Lockers) extension,
+# with the encodings of Zkl-ISA-unpriv.adoc (riscv-high-assurance-
+# cryptography).  The opcode and funct3 allocations are provisional.
+# The fields are decoded by the helpers, which receive the instruction word.
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# MISC-MEM funct3=4: kl.exec, kl.mvin/kl.mvout, kl.size/kl.avail, kl.getmd*,
+# kl.getnl (kl.restrict*, kl.clone/rename/swap, kl.derive: not implemented)
+kl_exec_grp  ----------------- 100 ----- 0001111
+# MISC-MEM funct3=3: kl.setst, kl.mgmt, kl.clear, kl.clearall, kl.clearads,
+# kl.setnl, kl.setnli
+kl_setst     ----------------- 011 ----- 0001111
+# LOAD funct3=7: kl.load %offset(Xs), Xl   (kl.input with Zklio)
+kl_load      ----------------- 111 ----- 0000011
+# STORE funct3=5: kl.store %offset(Xs), Xl   (kl.output with Zklio)
+kl_store     ----------------- 101 ----- 0100011

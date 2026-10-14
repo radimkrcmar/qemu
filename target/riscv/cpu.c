@@ -40,6 +40,7 @@
 #include "kvm/kvm_riscv.h"
 #include "tcg/tcg-cpu.h"
 #include "disas/capstone.h"
+#include "qemu/guest-random.h"
 #if !defined(CONFIG_USER_ONLY)
 #include "target/riscv/tcg/debug.h"
 #endif
@@ -210,6 +211,7 @@ const RISCVIsaExtData isa_edata_arr[] = {
     ISA_EXT_DATA_ENTRY(zbkx, PRIV_VERSION_1_12_0, ext_zbkx),
     ISA_EXT_DATA_ENTRY(zbs, PRIV_VERSION_1_12_0, ext_zbs),
     ISA_EXT_DATA_ENTRY(zk, PRIV_VERSION_1_12_0, ext_zk),
+    ISA_EXPERIMENTAL_EXT_DATA_ENTRY(zkl, PRIV_VERSION_1_13_0, ext_zkl),
     ISA_EXT_DATA_ENTRY(zkn, PRIV_VERSION_1_12_0, ext_zkn),
     ISA_EXT_DATA_ENTRY(zknd, PRIV_VERSION_1_12_0, ext_zknd),
     ISA_EXT_DATA_ENTRY(zkne, PRIV_VERSION_1_12_0, ext_zkne),
@@ -264,6 +266,8 @@ const RISCVIsaExtData isa_edata_arr[] = {
     ISA_EXT_DATA_ENTRY(smctr, PRIV_VERSION_1_12_0, ext_smctr),
     ISA_EXT_DATA_ENTRY(smdbltrp, PRIV_VERSION_1_13_0, ext_smdbltrp),
     ISA_EXT_DATA_ENTRY(smepmp, PRIV_VERSION_1_12_0, ext_smepmp),
+    ISA_INTERNAL_EXT_DATA_ENTRY(smklstatus, PRIV_VERSION_1_13_0,
+                                ext_smklstatus),
     ISA_EXT_DATA_ENTRY(smpmpmt, PRIV_VERSION_1_12_0, ext_smpmpmt),
     ISA_EXT_DATA_ENTRY(smrnmi, PRIV_VERSION_1_12_0, ext_smrnmi),
     ISA_EXT_DATA_ENTRY(smmpm, PRIV_VERSION_1_13_0, ext_smmpm),
@@ -278,6 +282,8 @@ const RISCVIsaExtData isa_edata_arr[] = {
     ISA_EXT_DATA_ENTRY(sscsrind, PRIV_VERSION_1_12_0, ext_sscsrind),
     ISA_EXT_DATA_ENTRY(ssctr, PRIV_VERSION_1_12_0, ext_ssctr),
     ISA_EXT_DATA_ENTRY(ssdbltrp, PRIV_VERSION_1_13_0, ext_ssdbltrp),
+    ISA_INTERNAL_EXT_DATA_ENTRY(ssklstatus, PRIV_VERSION_1_13_0,
+                                ext_ssklstatus),
     ISA_EXT_DATA_ENTRY(ssnpm, PRIV_VERSION_1_13_0, ext_ssnpm),
     ISA_EXT_DATA_ENTRY(sspm, PRIV_VERSION_1_13_0, ext_sspm),
     ISA_INTERNAL_EXT_DATA_ENTRY(ssstateen, PRIV_VERSION_1_12_0, ext_ssstateen),
@@ -391,6 +397,14 @@ static const char * const riscv_excp_names[] = {
     [RISCV_EXCP_LOAD_GUEST_ACCESS_FAULT] = "guest_load_page_fault",
     [RISCV_EXCP_VIRT_INSTRUCTION_FAULT] = "virt_illegal_instruction",
     [RISCV_EXCP_STORE_GUEST_AMO_ACCESS_FAULT] = "guest_store_page_fault",
+    [RISCV_EXCP_KL_FATAL_ERROR] = "kle_fatal_error",
+    [RISCV_EXCP_KL_MISSING_CSK] = "kle_missing_csk",
+    [RISCV_EXCP_KL_LOCKER_OFF] = "kle_locker_off",
+    [RISCV_EXCP_KL_UNSUPPORTED_METADATA] = "kle_unsupported_metadata",
+    [RISCV_EXCP_KL_PRIVILEGE_VIOLATION] = "kle_privilege_violation",
+    [RISCV_EXCP_KL_OUT_OF_MEMORY] = "kle_out_of_memory",
+    [RISCV_EXCP_KL_RBG_UNAVAILABLE] = "kle_rbg_unavailable",
+    [RISCV_EXCP_KL_CLOCK_UNAVAILABLE] = "kle_clock_unavailable",
     [RISCV_EXCP_SEMIHOST] = "semihost",
 };
 
@@ -967,6 +981,56 @@ bool riscv_cpu_has_work(CPUState *cs)
 }
 #endif /* !CONFIG_USER_ONLY */
 
+/*
+ * Zkl: KLE unit reset (Zkl-ISA-unpriv.adoc "KLE Unprivileged State out of
+ * Reset", Zkl-ISA-priv.adoc "KLE Privileged State out of Reset").
+ *
+ * With x-zkl-csk-random the CSK follows the fourth model of "Architectural
+ * Requirements on the Context Sealing Key": generated once at power-on,
+ * shared by all harts and not affected by a hart reset.  With x-zkl-csk it
+ * is the given value, standing in for the second and third models (set by a
+ * secure block, or hardwired), which no software sees either.  Otherwise it
+ * is programmed by M-mode through the mklcsk group.
+ */
+RISCVKleSecrets riscv_zkl_secrets;
+
+static void riscv_zkl_reset(RISCVCPU *cpu)
+{
+    CPURISCVState *env = &cpu->env;
+    RISCVKleState *kl = &env->kle;
+
+    memset(kl, 0, sizeof(*kl));
+    kl->klnamedlocker = KL_NUM_LOCKERS;
+    kl->mllockerstatus = KL_LS_ALL_INITIAL;
+    kl->sllockerstatus = KL_LS_ALL_INITIAL;
+    env->mstatus = set_field(env->mstatus, MSTATUS_KLS, EXT_STATUS_DISABLED);
+
+    if (cpu->cfg.zkl_csk_random || cpu->cfg.zkl_csk_fixed) {
+        uint64_t *csk = riscv_zkl_secrets.csk;
+
+        /* A fixed CSK was stored at realize, and is not zero. */
+        while (!(csk[0] | csk[1] | csk[2] | csk[3])) {
+            qemu_guest_getrandom_nofail(csk, sizeof(kl->csk));
+        }
+        memcpy(kl->csk, csk, sizeof(kl->csk));
+        kl->csk_active = true;
+    }
+}
+
+#ifndef CONFIG_USER_ONLY
+/* The secrets are process-wide: the first Zkl hart registers them once. */
+static void riscv_zkl_realize(void)
+{
+    static bool registered;
+
+    if (!registered) {
+        vmstate_register_any(NULL, &vmstate_riscv_zkl_secrets,
+                             &riscv_zkl_secrets);
+        registered = true;
+    }
+}
+#endif
+
 static void riscv_cpu_reset_hold(Object *obj, ResetType type)
 {
     CPUState *cs = CPU(obj);
@@ -1091,6 +1155,10 @@ static void riscv_cpu_reset_hold(Object *obj, ResetType type)
     /* Default NaN value: sign bit clear, frac msb set */
     set_float_default_nan_pattern(0b01000000, &env->fp_status);
     env->vill = true;
+
+    if (cpu->cfg.ext_zkl) {
+        riscv_zkl_reset(cpu);
+    }
 
 #ifndef CONFIG_USER_ONLY
 #ifdef CONFIG_TCG
@@ -1336,6 +1404,11 @@ static void riscv_cpu_realize(DeviceState *dev, Error **errp)
 #if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
     if (cpu->cfg.debug || cpu->cfg.ext_sdtrig) {
         riscv_trigger_realize(&cpu->env);
+    }
+#endif
+#ifndef CONFIG_USER_ONLY
+    if (cpu->cfg.ext_zkl) {
+        riscv_zkl_realize();
     }
 #endif
 
@@ -2983,6 +3056,18 @@ static const Property riscv_cpu_properties[] = {
      * it with -x and default to 'false'.
      */
     DEFINE_PROP_BOOL("x-misa-w", RISCVCPU, cfg.misa_w, false),
+    DEFINE_PROP_BOOL("x-zkl-csk-random", RISCVCPU, cfg.zkl_csk_random, false),
+    /* The CSK as 64 hexadecimal digits, byte 0 first; excludes the above. */
+    DEFINE_PROP_STRING("x-zkl-csk", RISCVCPU, zkl_csk),
+    /* The AES CTR Machines; off leaves only ECB, as an older unit. */
+    DEFINE_PROP_BOOL("x-zkl-ctr", RISCVCPU, cfg.zkl_ctr, true),
+    /* The AES-GCM Machines; off leaves them out, as a smaller unit. */
+    DEFINE_PROP_BOOL("x-zkl-gcm", RISCVCPU, cfg.zkl_gcm, true),
+    /*
+     * Smklstatus, and Ssklstatus with S-mode, which an M+S+U hart must
+     * implement; off leaves them out, as an older unit.
+     */
+    DEFINE_PROP_BOOL("x-zkl-status", RISCVCPU, cfg.zkl_status, true),
 };
 
 static const gchar *riscv_gdb_arch_name(CPUState *cs)

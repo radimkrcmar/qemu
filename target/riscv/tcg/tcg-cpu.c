@@ -30,6 +30,7 @@
 #include "qemu/accel.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
+#include "qemu/cutils.h"
 #include "accel/accel-cpu-target.h"
 #include "accel/tcg/cpu-ops.h"
 #include "tcg/tcg.h"
@@ -722,6 +723,65 @@ void riscv_cpu_validate_set_extensions(RISCVCPU *cpu, Error **errp)
         error_setg(errp,
                    "Vector crypto extensions require V or Zve* extensions");
         return;
+    }
+
+    if (cpu->cfg.ext_zkl) {
+        /*
+         * Prototype: Zkl with Zklv, Zklmv and Zklmem, RV64 only.  Every
+         * Form that carries an MDH or a 128-bit block needs VLEN >= 128.
+         */
+        if (!riscv_has_ext(env, RVV) || cpu->cfg.vlenb < 16) {
+            error_setg(errp, "Zkl requires V with VLEN >= 128");
+            return;
+        }
+        if (riscv_cpu_mxl(env) != MXL_RV64) {
+            error_setg(errp, "Zkl is only implemented for RV64");
+            return;
+        }
+        riscv_cpu_write_misa_bit(cpu, RVL, true);
+        cpu->cfg.ext_smklstatus = cpu->cfg.zkl_status;
+        cpu->cfg.ext_ssklstatus = cpu->cfg.zkl_status &&
+                                  riscv_has_ext(env, RVS);
+        /*
+         * x-zkl-csk: the CSK as 64 hexadecimal digits, byte 0 first, as
+         * the specification writes it (byte i is bits [8i+7:8i]).  It is
+         * process-wide, like the random one: every hart stores the same
+         * value, and riscv_zkl_reset() installs it.
+         */
+        if (cpu->zkl_csk) {
+            uint8_t csk[32];
+            int i;
+
+            if (cpu->cfg.zkl_csk_random) {
+                error_setg(errp, "x-zkl-csk and x-zkl-csk-random exclude "
+                                 "each other");
+                return;
+            }
+            if (strlen(cpu->zkl_csk) != 2 * sizeof(csk)) {
+                error_setg(errp, "x-zkl-csk takes %zu hexadecimal digits",
+                           2 * sizeof(csk));
+                return;
+            }
+            for (i = 0; i < sizeof(csk); i++) {
+                int hi = g_ascii_xdigit_value(cpu->zkl_csk[2 * i]);
+                int lo = g_ascii_xdigit_value(cpu->zkl_csk[2 * i + 1]);
+
+                if (hi < 0 || lo < 0) {
+                    error_setg(errp, "x-zkl-csk: '%c%c' is not hexadecimal",
+                               cpu->zkl_csk[2 * i], cpu->zkl_csk[2 * i + 1]);
+                    return;
+                }
+                csk[i] = hi << 4 | lo;
+            }
+            if (buffer_is_zero(csk, sizeof(csk))) {
+                error_setg(errp, "x-zkl-csk: all zeros means no CSK");
+                return;
+            }
+            for (i = 0; i < ARRAY_SIZE(riscv_zkl_secrets.csk); i++) {
+                riscv_zkl_secrets.csk[i] = ldq_le_p(csk + 8 * i);
+            }
+            cpu->cfg.zkl_csk_fixed = true;
+        }
     }
 
     if ((cpu->cfg.ext_zvbc || cpu->cfg.ext_zvknhb) && !cpu->cfg.ext_zve64x) {

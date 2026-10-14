@@ -32,6 +32,7 @@
 #include "qapi/error.h"
 #include "tcg/insn-start-words.h"
 #include "internals.h"
+#include "zkl_internal.h"
 #if !defined(CONFIG_USER_ONLY)
 #include "target/riscv/tcg/debug.h"
 #endif
@@ -291,6 +292,81 @@ static RISCVException smcntrpmf_32(CPURISCVState *env, int csrno)
 static RISCVException any(CPURISCVState *env, int csrno)
 {
     return RISCV_EXCP_NONE;
+}
+
+/*
+ * Zkl (KLE) CSRs.  Unprivileged: Zkl-ISA-unpriv.adoc "CSRs";
+ * privileged: Zkl-ISA-priv.adoc "CSRs".  Reads of the hardwired
+ * identification CSRs are not gated by KLS, and M-mode cannot write them
+ * (this unit presents no emulated one); the other KLE CSRs raise an
+ * illegal-instruction exception while KLS is Off.  klstart and
+ * klnamedlocker also require an active CSK; the Locality and mklcsk
+ * groups and the *llockerstatus CSRs do not.
+ */
+static RISCVException smode(CPURISCVState *env, int csrno);
+
+static RISCVException zkl_id(CPURISCVState *env, int csrno)
+{
+    return riscv_cpu_cfg(env)->ext_zkl ? RISCV_EXCP_NONE
+                                       : RISCV_EXCP_ILLEGAL_INST;
+}
+
+static RISCVException zkl_u(CPURISCVState *env, int csrno)
+{
+    if (!riscv_cpu_cfg(env)->ext_zkl) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+#if !defined(CONFIG_USER_ONLY)
+    if (!env->debugger) {
+        if (zkl_kls_off(env)) {
+            return RISCV_EXCP_ILLEGAL_INST;
+        }
+        if (!zkl_csk_ready(env)) {
+            return RISCV_EXCP_KL_MISSING_CSK;
+        }
+    }
+#endif
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException zkl_locality(CPURISCVState *env, int csrno)
+{
+    if (!riscv_cpu_cfg(env)->ext_zkl) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+#if !defined(CONFIG_USER_ONLY)
+    if (!env->debugger && zkl_kls_off(env)) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+#endif
+    if (csrno == CSR_SKLLOCALITY0 || csrno == CSR_SKLLOCALITY1 ||
+        csrno == CSR_SLLOCKERSTATUS) {
+        return smode(env, csrno);
+    }
+    return RISCV_EXCP_NONE;
+}
+
+/*
+ * mllockerstatus (Smklstatus) and sllockerstatus (Ssklstatus): like the
+ * Locality groups, gated by KLS but not by the CSK.
+ */
+static RISCVException zkl_status(CPURISCVState *env, int csrno)
+{
+    if (csrno == CSR_MLLOCKERSTATUS ? !riscv_cpu_cfg(env)->ext_smklstatus
+                                    : !riscv_cpu_cfg(env)->ext_ssklstatus) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+    return zkl_locality(env, csrno);
+}
+
+static RISCVException zkl_csk(CPURISCVState *env, int csrno)
+{
+    /* Neither a random nor a fixed CSK is seen by any software. */
+    if (riscv_cpu_cfg(env)->zkl_csk_random ||
+        riscv_cpu_cfg(env)->zkl_csk_fixed) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+    return zkl_locality(env, csrno);
 }
 
 static RISCVException any32(CPURISCVState *env, int csrno)
@@ -1919,6 +1995,103 @@ static RISCVException read_mhartid(CPURISCVState *env, int csrno,
     return RISCV_EXCP_NONE;
 }
 
+/* Zkl (KLE) CSRs */
+static RISCVException read_zkl(CPURISCVState *env, int csrno,
+                               target_ulong *val)
+{
+    RISCVKleState *kl = &env->kle;
+
+    switch (csrno) {
+    case CSR_KLSTART:
+        *val = kl->klstart;
+        break;
+    case CSR_KLNAMEDLOCKER:
+        *val = kl->klnamedlocker;
+        break;
+    case CSR_KLMVENDORID:
+    case CSR_KLMARCHID:
+    case CSR_KLMIMPID:
+    case CSR_KLMAXIOBUFLEN:     /* no Zklio */
+        *val = 0;
+        break;
+    case CSR_SKLLOCALITY0 ... CSR_SKLLOCALITY1:
+        *val = kl->slocality[csrno - CSR_SKLLOCALITY0];
+        break;
+    case CSR_MKLLOCALITY0 ... CSR_MKLLOCALITY1:
+        *val = kl->mlocality[csrno - CSR_MKLLOCALITY0];
+        break;
+    case CSR_MKLPHYSBOOTSCRT0 ... CSR_MKLPHYSBOOTSCRT1:
+        *val = kl->physbootscrt[csrno - CSR_MKLPHYSBOOTSCRT0];
+        break;
+    case CSR_MKLCSK0 ... CSR_MKLCSK3:
+        *val = kl->csk_active ? kl->csk[csrno - CSR_MKLCSK0] : 0;
+        break;
+    case CSR_MLLOCKERSTATUS:
+        *val = kl->mllockerstatus;
+        break;
+    case CSR_SLLOCKERSTATUS:
+        *val = kl->sllockerstatus;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_zkl(CPURISCVState *env, int csrno,
+                                target_ulong val, uintptr_t ra)
+{
+    RISCVKleState *kl = &env->kle;
+    int i;
+
+    switch (csrno) {
+    case CSR_KLSTART:
+        kl->klstart = val;
+        break;
+    case CSR_KLNAMEDLOCKER:
+        /* Values 33 and above are reserved and leave it unchanged. */
+        if (val <= KL_NUM_LOCKERS) {
+            kl->klnamedlocker = val;
+        }
+        break;
+    case CSR_SKLLOCALITY0 ... CSR_SKLLOCALITY1:
+        kl->slocality[csrno - CSR_SKLLOCALITY0] = val;
+        break;
+    case CSR_MKLLOCALITY0 ... CSR_MKLLOCALITY1:
+        kl->mlocality[csrno - CSR_MKLLOCALITY0] = val;
+        break;
+    case CSR_MKLPHYSBOOTSCRT0 ... CSR_MKLPHYSBOOTSCRT1:
+        kl->physbootscrt[csrno - CSR_MKLPHYSBOOTSCRT0] = val;
+        break;
+    case CSR_MLLOCKERSTATUS:
+        kl->mllockerstatus = val;
+        break;
+    case CSR_SLLOCKERSTATUS:
+        kl->sllockerstatus = val;
+        break;
+    case CSR_MKLCSK0 ... CSR_MKLCSK3:
+        /*
+         * A new CSK becomes active only once every CSR of the group has been
+         * written; all-zeros leaves the unit without a CSK.  The mklcsk
+         * group is not tracked by KLS.
+         */
+        i = csrno - CSR_MKLCSK0;
+        kl->csk_pending[i] = val;
+        kl->csk_written |= 1 << i;
+        if (kl->csk_written == 0xf) {
+            kl->csk_written = 0;
+            memcpy(kl->csk, kl->csk_pending, sizeof(kl->csk));
+            kl->csk_active = kl->csk[0] | kl->csk[1] | kl->csk[2] | kl->csk[3];
+            memset(kl->csk_pending, 0, sizeof(kl->csk_pending));
+        }
+        return RISCV_EXCP_NONE;
+    default:
+        g_assert_not_reached();
+    }
+    zkl_mark_dirty(env);
+    return RISCV_EXCP_NONE;
+}
+
 /* Machine Trap Setup */
 
 /* We do not store SD explicitly, only compute it on demand. */
@@ -1926,6 +2099,7 @@ static uint64_t add_status_sd(RISCVMXL xl, uint64_t status)
 {
     if ((status & MSTATUS_FS) == MSTATUS_FS ||
         (status & MSTATUS_VS) == MSTATUS_VS ||
+        (status & MSTATUS_KLS) == MSTATUS_KLS ||
         (status & MSTATUS_XS) == MSTATUS_XS) {
         switch (xl) {
         case MXL_RV32:
@@ -2053,6 +2227,10 @@ static RISCVException write_mstatus(CPURISCVState *env, int csrno,
 
     if (riscv_cpu_cfg(env)->ext_zve32x) {
         mask |= MSTATUS_VS;
+    }
+
+    if (riscv_cpu_cfg(env)->ext_zkl) {
+        mask |= MSTATUS_KLS;
     }
 
     if (riscv_env_smode_dbltrp_enabled(env, env->virt_enabled)) {
@@ -4035,6 +4213,9 @@ static RISCVException read_sstatus(CPURISCVState *env, int csrno,
     if (riscv_cpu_cfg(env)->ext_ssdbltrp) {
         mask |= SSTATUS_SDT;
     }
+    if (riscv_cpu_cfg(env)->ext_zkl) {
+        mask |= SSTATUS_KLS;
+    }
 
     *val = add_status_sd(riscv_cpu_sxl(env), env->mstatus & mask);
     return RISCV_EXCP_NONE;
@@ -4056,6 +4237,9 @@ static RISCVException write_sstatus(CPURISCVState *env, int csrno,
     }
     if (riscv_cpu_cfg(env)->ext_ssdbltrp) {
         mask |= SSTATUS_SDT;
+    }
+    if (riscv_cpu_cfg(env)->ext_zkl) {
+        mask |= SSTATUS_KLS;
     }
     target_ulong newval = (env->mstatus & ~mask) | (val & mask);
     return write_mstatus(env, CSR_MSTATUS, newval, ra);
@@ -5958,6 +6142,30 @@ riscv_csr_operations csr_ops[CSR_TABLE_SIZE] = {
 
     /* Crypto Extension */
     [CSR_SEED] = { "seed", seed, NULL, NULL, rmw_seed },
+
+    /* Zkl (KLE): provisional addresses */
+    [CSR_KLSTART]         = { "klstart",         zkl_u,  read_zkl, write_zkl },
+    [CSR_KLNAMEDLOCKER]   = { "klnamedlocker",   zkl_u,  read_zkl, write_zkl },
+    [CSR_KLMVENDORID]     = { "klmvendorid",     zkl_id, read_zkl },
+    [CSR_KLMARCHID]       = { "klmarchid",       zkl_id, read_zkl },
+    [CSR_KLMIMPID]        = { "klmimpid",        zkl_id, read_zkl },
+    [CSR_KLMAXIOBUFLEN]   = { "klmaxiobuflen",   zkl_id, read_zkl },
+    [CSR_SKLLOCALITY0]    = { "skllocality0", zkl_locality, read_zkl, write_zkl },
+    [CSR_SKLLOCALITY1]    = { "skllocality1", zkl_locality, read_zkl, write_zkl },
+    [CSR_MKLCSK0]         = { "mklcsk0",      zkl_csk,      read_zkl, write_zkl },
+    [CSR_MKLCSK0 + 1]     = { "mklcsk1",      zkl_csk,      read_zkl, write_zkl },
+    [CSR_MKLCSK0 + 2]     = { "mklcsk2",      zkl_csk,      read_zkl, write_zkl },
+    [CSR_MKLCSK3]         = { "mklcsk3",      zkl_csk,      read_zkl, write_zkl },
+    [CSR_MKLLOCALITY0]    = { "mkllocality0", zkl_locality, read_zkl, write_zkl },
+    [CSR_MKLLOCALITY1]    = { "mkllocality1", zkl_locality, read_zkl, write_zkl },
+    [CSR_MKLPHYSBOOTSCRT0] = { "mklphysbootscrt0", zkl_locality, read_zkl,
+                               write_zkl },
+    [CSR_MKLPHYSBOOTSCRT1] = { "mklphysbootscrt1", zkl_locality, read_zkl,
+                               write_zkl },
+    [CSR_MLLOCKERSTATUS]  = { "mllockerstatus", zkl_status, read_zkl,
+                              write_zkl },
+    [CSR_SLLOCKERSTATUS]  = { "sllockerstatus", zkl_status, read_zkl,
+                              write_zkl },
 
     /* Zcmt Extension */
     [CSR_JVT] = {"jvt", zcmt, read_jvt, write_jvt},

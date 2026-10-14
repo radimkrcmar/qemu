@@ -15,7 +15,8 @@ riscv_ss.add(files(
   'vcrypto_helper.c',
   'vector_helper.c',
   'vector_internals.c',
-  'zce_helper.c'))
+  'zce_helper.c',
+  'zkl_helper.c'))
 
 
 riscv_system_ss.add(files(

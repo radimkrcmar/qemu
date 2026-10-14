@@ -32,6 +32,7 @@
 #include "qemu/int128.h"
 #include "cpu_bits.h"
 #include "cpu_cfg.h"
+#include "zkl.h"
 #include "qapi/qapi-types-common.h"
 #include "cpu-qom.h"
 
@@ -69,6 +70,7 @@ typedef struct CPUArchState CPURISCVState;
 #define RVH RV('H')
 #define RVG RV('G')
 #define RVB RV('B')
+#define RVL RV('L') /* Zkl (KLE), provisional; set iff ext_zkl */
 #define RVX RV('X')
 
 extern const uint32_t misa_bits[];
@@ -252,6 +254,9 @@ typedef struct PMUFixedCtrState {
 struct CPUArchState {
     uint64_t gpr[32];
     uint64_t gprh[32]; /* 64 top bits of the 128-bit registers */
+
+    /* Zkl (KLE) state. */
+    RISCVKleState kle;
 
     /* vector coprocessor state. */
     uint64_t vreg[32 * RV_VLEN_MAX / 64] QEMU_ALIGNED(16);
@@ -587,6 +592,8 @@ struct ArchCPU {
     GHashTable *user_options;
     GHashTable *misa_ext_user_opts;
     GHashTable *multi_ext_user_opts;
+    /* x-zkl-csk: the CSK, 64 hexadecimal digits; parsed at realize. */
+    char *zkl_csk;
     const GPtrArray *decoders;
 };
 

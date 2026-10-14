@@ -104,6 +104,7 @@ target_ulong fclass_d(uint64_t frs1);
 
 #ifndef CONFIG_USER_ONLY
 extern const VMStateDescription vmstate_riscv_cpu;
+extern const VMStateDescription vmstate_riscv_zkl_secrets;
 #endif
 
 enum {
